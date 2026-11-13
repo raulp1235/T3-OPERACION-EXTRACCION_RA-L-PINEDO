@@ -1,0 +1,379 @@
+# T3-OPERACION-EXTRACCION_RA-L-PINEDO
+a continuacion esta el codigo fuente del proyecto
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+
+
+const CFG = {
+  playerSpeed: 6.5, playerRadius: 0.45, boostMult: 1.6, boostTime: 6,
+  detectRange: 22,                         
+  zombieHP: 2,                             
+  startAmmo:  { ak: 24, sniper: 8 },          
+  pickupAmmo: { ak: 12, sniper: 4 },          
+  range:      { ak: 120, sniper: 300 },    
+  cooldown:   { ak: 0.11, sniper: 0.9 },    
+};
+const ZTYPES = {
+  pvz:    { file: 'zombie_pvz.glb',    speed: 4.4, catchDist: 1.1, height: 2.1, scale: 0.95, hitR: 0.55, hitH: 2.0, flip: 0 },
+  mutant: { file: 'zombie_mutant.glb', speed: 3.2, catchDist: 1.6, height: 2.5, scale: 0.90, hitR: 0.95, hitH: 2.4, flip: Math.PI }, // el modelo mira hacia -Z, se gira PI
+};
+
+
+const $ = id => document.getElementById(id);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b1118);
+scene.fog = new THREE.Fog(0x0b1118, 12, 85);
+
+const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.05, 300);
+camera.rotation.order = 'YXZ';
+scene.add(camera);
+
+scene.add(new THREE.HemisphereLight(0x8899bb, 0x223344, 1.5));
+const moon = new THREE.DirectionalLight(0x99aadd, 1.1); moon.position.set(-30, 60, 20); scene.add(moon);
+const flash = new THREE.SpotLight(0xfff2cc, 60, 50, 0.45, 0.6, 1);   // linterna
+flash.position.set(0, 0, 0); flash.target.position.set(0, 0, -1);
+camera.add(flash, flash.target);
+const muzzle = new THREE.PointLight(0xffaa33, 0, 12); camera.add(muzzle); muzzle.position.set(0.2, -0.1, -0.9);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+
+const colliders = [];        
+const wallMeshes = [];      
+
+function addBox(x, z, w, d, h, color, solid = true) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), new THREE.MeshStandardMaterial({ color, roughness: 0.9 }));
+  m.position.set(x, h / 2, z); scene.add(m);
+  if (solid) { colliders.push({ minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2 }); wallMeshes.push(m); }
+  return m;
+}
+
+function groundTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d'); g.fillStyle = '#2b2f33'; g.fillRect(0, 0, 256, 256);
+  for (let i = 0; i < 2500; i++) { const v = 35 + Math.random() * 30 | 0; g.fillStyle = `rgb(${v},${v + 3},${v + 6})`; g.fillRect(Math.random() * 256, Math.random() * 256, 2, 2); }
+  g.strokeStyle = '#555'; g.lineWidth = 2; g.strokeRect(0, 0, 256, 256);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(14, 55); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function windowTexture() {
+  const c = document.createElement('canvas'); c.width = 128; c.height = 256;
+  const g = c.getContext('2d'); g.fillStyle = '#1a1d22'; g.fillRect(0, 0, 128, 256);
+  for (let y = 10; y < 250; y += 28) for (let x = 10; x < 120; x += 26) {
+    g.fillStyle = Math.random() < 0.12 ? '#c9a24a' : '#0c0e11'; g.fillRect(x, y, 14, 18);
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 220), new THREE.MeshStandardMaterial({ map: groundTexture(), roughness: 1 }));
+ground.rotation.x = -Math.PI / 2; scene.add(ground);
+
+
+addBox(-21, 0, 2, 214, 7, 0x3a3f46); addBox(21, 0, 2, 214, 7, 0x3a3f46);
+addBox(0, 106, 44, 2, 7, 0x3a3f46);  addBox(0, -106, 44, 2, 7, 0x3a3f46);
+
+
+const winTex = windowTexture();
+for (let i = 0; i < 26; i++) {
+  const side = i % 2 ? 1 : -1, h = 14 + (i * 37 % 18), z = -100 + Math.floor(i / 2) * 16 + (i % 3) * 2;
+  const b = new THREE.Mesh(new THREE.BoxGeometry(12, h, 12), new THREE.MeshStandardMaterial({ map: winTex, color: 0x667080 }));
+  b.position.set(side * 29, h / 2, z); scene.add(b);
+}
+
+
+const BARRICADES = [[60, -8], [25, 10], [-10, -10], [-45, 8], [-75, 0]];
+for (const [z, gap] of BARRICADES) {
+  const gw = 6, l0 = -20, l1 = gap - gw / 2, r0 = gap + gw / 2, r1 = 20;
+  addBox((l0 + l1) / 2, z, l1 - l0, 1.5, 3, 0x6b4f3a);
+  addBox((r0 + r1) / 2, z, r1 - r0, 1.5, 3, 0x6b4f3a);
+}
+
+const CRATES = [[-6,80,2,2],[8,84,3,2],[-14,70,2,2],[5,55,2.5,2.5],[-10,48,3,2],[12,38,2,3],[-4,32,2,2],[0,18,6,2.2],[-12,5,2,2],
+  [10,-5,2,2],[-8,-18,3,2],[6,-28,2,2],[-10,-38,2.5,2.5],[8,-52,3,2],[-5,-64,2,2],[12,-80,2,2],[-12,-80,3,2]];
+CRATES.forEach(([x, z, w, d], i) => addBox(x, z, w, d, i % 4 === 3 ? 1.6 : 1.3, i % 4 === 3 ? 0x7a2d2d : 0x4a5a3a));
+
+
+const startPad = new THREE.Mesh(new THREE.CircleGeometry(5, 32), new THREE.MeshBasicMaterial({ color: 0x2a6fdb, transparent: true, opacity: 0.45 }));
+startPad.rotation.x = -Math.PI / 2; startPad.position.set(0, 0.03, 96); scene.add(startPad);
+const EXTRACT = new THREE.Vector3(0, 0, -96), EXTRACT_R = 5;
+const exPad = new THREE.Mesh(new THREE.CircleGeometry(EXTRACT_R, 40), new THREE.MeshBasicMaterial({ color: 0x22ff66, transparent: true, opacity: 0.5 }));
+exPad.rotation.x = -Math.PI / 2; exPad.position.set(EXTRACT.x, 0.03, EXTRACT.z); scene.add(exPad);
+const beacon = new THREE.Mesh(new THREE.CylinderGeometry(EXTRACT_R, EXTRACT_R, 40, 32, 1, true),
+  new THREE.MeshBasicMaterial({ color: 0x22ff66, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }));
+beacon.position.set(EXTRACT.x, 20, EXTRACT.z); scene.add(beacon);
+
+const pickups = [];
+const AMMO_POS = [[6,76],[-15,50],[15,22],[-14,-8],[14,-30],[-14,-48],[14,-62],[-14,-82]];
+const BOOST_POS = [[0,10],[0,-56]];
+const ammoGeo = new THREE.BoxGeometry(0.6, 0.4, 0.4), ammoMat = new THREE.MeshStandardMaterial({ color: 0xf5c518, emissive: 0x7a5a00 });
+AMMO_POS.forEach(([x, z]) => { const m = new THREE.Mesh(ammoGeo, ammoMat); m.position.set(x, 0.7, z); scene.add(m); pickups.push({ m, type: 'ammo' }); });
+const boostGeo = new THREE.IcosahedronGeometry(0.4), boostMat = new THREE.MeshStandardMaterial({ color: 0x33ddff, emissive: 0x006688 });
+BOOST_POS.forEach(([x, z]) => { const m = new THREE.Mesh(boostGeo, boostMat); m.position.set(x, 0.8, z); scene.add(m); pickups.push({ m, type: 'boost' }); });
+
+
+function resolve(pos, r) {
+  for (const c of colliders) {
+    const cx = Math.max(c.minX, Math.min(pos.x, c.maxX)), cz = Math.max(c.minZ, Math.min(pos.z, c.maxZ));
+    const dx = pos.x - cx, dz = pos.z - cz, d2 = dx * dx + dz * dz;
+    if (d2 >= r * r) continue;
+    if (d2 > 1e-8) { const d = Math.sqrt(d2); pos.x += dx / d * (r - d); pos.z += dz / d * (r - d); }
+    else {
+      const l = pos.x - c.minX, rr = c.maxX - pos.x, t = pos.z - c.minZ, b = c.maxZ - pos.z, m = Math.min(l, rr, t, b);
+      if (m === l) pos.x = c.minX - r; else if (m === rr) pos.x = c.maxX + r; else if (m === t) pos.z = c.minZ - r; else pos.z = c.maxZ + r;
+    }
+  }
+}
+
+
+const loader = new GLTFLoader();
+const load = f => loader.loadAsync('assets/' + f);
+let gltfs = {};
+const hand = new THREE.Group(); camera.add(hand);      
+const weapons = [];                                      
+
+function centerAndScale(obj, target) {
+  obj.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(obj), size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+  obj.position.sub(ctr);
+  const wrap = new THREE.Group(); wrap.add(obj);
+  wrap.scale.setScalar(target / Math.max(size.x, size.y, size.z));
+  return wrap;
+}
+function buildWeapons() {
+  const ak = centerAndScale(gltfs.ak.scene, 0.62);
+  const akPivot = new THREE.Group(); ak.rotation.y = Math.PI / 2; akPivot.add(ak);
+  akPivot.position.set(0.2, -0.2, -0.45);
+  const sn = centerAndScale(gltfs.sniper.scene, 0.95);
+  const snPivot = new THREE.Group(); sn.rotation.y = Math.PI / 2; snPivot.add(sn);
+  snPivot.position.set(0.2, -0.22, -0.7);
+  for (const p of [akPivot, snPivot]) { p.traverse(o => { if (o.isMesh) o.frustumCulled = false; }); hand.add(p); }
+  weapons.push({ key: 'ak', name: 'AK-47', pivot: akPivot, base: akPivot.position.clone() },
+               { key: 'sniper', name: 'SNIPER', pivot: snPivot, base: snPivot.position.clone() });
+}
+
+
+const zombies = [];
+const hitboxes = [];
+const ZOMBIE_SPAWNS = [[-10,72,'pvz'],[12,68,'pvz'],[0,45,'mutant'],[-12,40,'pvz'],[14,30,'pvz'],[-6,15,'pvz'],[8,8,'mutant'],[-14,-2,'pvz'],
+  [5,-20,'pvz'],[-8,-28,'mutant'],[12,-38,'pvz'],[-12,-52,'pvz'],[0,-58,'mutant'],[10,-68,'pvz'],[-10,-72,'pvz'],[3,-85,'mutant'],[-8,-88,'pvz']];
+
+function spawnZombie(x, z, type) {
+  const T = ZTYPES[type], g = gltfs[type];
+  const model = SkeletonUtils.clone(g.scene);
+  const mats = [];
+  model.traverse(o => {
+    if (o.isMesh) { o.frustumCulled = false; o.material = o.material.clone(); mats.push(o.material); }
+  });
+  const holder = new THREE.Group(); holder.scale.setScalar(T.scale); holder.rotation.y = T.flip; holder.add(model);
+  const root = new THREE.Group(); root.rotation.order = 'YXZ'; root.position.set(x, 0, z); root.rotation.y = Math.random() * 6.28; root.add(holder);
+  const hit = new THREE.Mesh(new THREE.CylinderGeometry(T.hitR, T.hitR, T.hitH, 10), new THREE.MeshBasicMaterial({ visible: false }));
+  hit.position.y = T.hitH / 2; root.add(hit);
+  scene.add(root);
+  const zb = { type, T, root, holder, hit, hp: CFG.zombieHP, state: 'idle', mats, flashT: 0, deadT: 0, t: Math.random() * 10, mixer: null, actions: {}, cur: null };
+  hit.userData.zombie = zb;
+  if (g.animations.length) {          
+    zb.mixer = new THREE.AnimationMixer(model);
+    for (const c of g.animations) zb.actions[c.name] = zb.mixer.clipAction(c);
+    play(zb, 'Idle');
+  }
+  zombies.push(zb); hitboxes.push(hit);
+}
+function play(zb, name) {
+  const a = zb.actions[name]; if (!a || zb.cur === a) return;
+  a.reset().fadeIn(0.25).play(); if (zb.cur) zb.cur.fadeOut(0.25); zb.cur = a;
+  if (name === 'Walk') a.timeScale = 1.2;
+}
+
+const player = { pos: new THREE.Vector3(0, 1.7, 96), yaw: 0, pitch: 0, boost: 0 };
+const ammo = { ...CFG.startAmmo };
+let cur = 0, state = 'menu', kills = 0, cd = 0, kick = 0, toastT = 0, zoom = false;
+const keys = {};
+
+function toast(txt, ms = 1400) { const t = $('toast'); t.textContent = txt; t.style.opacity = 1; clearTimeout(toastT); toastT = setTimeout(() => t.style.opacity = 0, ms); }
+function hud() {
+  $('ammoN').textContent = ammo[weapons[cur].key]; $('ammoW').textContent = weapons[cur].name + ' (balas)';
+  $('s1').classList.toggle('on', cur === 0); $('s2').classList.toggle('on', cur === 1);
+  $('kills').textContent = kills; $('total').textContent = zombies.length;
+  $('boost').textContent = player.boost > 0 ? `⚡ VELOCIDAD ${player.boost.toFixed(0)}s` : '';
+}
+function setWeapon(i) { cur = i; zoom = false; weapons.forEach((w, k) => { w.pivot.visible = k === i; w.pivot.rotation.set(0, 0, 0); w.pivot.position.copy(w.base); }); hud(); }
+
+const SND = {};
+for (const n of ['ak_shot', 'sniper_shot', 'empty', 'pickup', 'hit']) { SND[n] = new Audio(`assets/sounds/${n}.wav`); SND[n].preload = 'auto'; }
+function playSound(name, vol = 1) {
+  const base = SND[name]; if (!base) return;
+  const a = base.cloneNode();            
+  a.volume = vol; a.play().catch(() => {});
+}
+
+
+const ray = new THREE.Raycaster();
+function fire() {
+  const w = weapons[cur], k = w.key;
+  if (cd > 0) return;
+  if (ammo[k] <= 0) { toast('SIN MUNICIÓN', 900); playSound('empty'); return; }  
+  ammo[k]--; cd = CFG.cooldown[k]; hud();
+  kick = k === 'ak' ? 1 : 2.5; muzzle.intensity = k === 'ak' ? 25 : 45;
+  playSound(k === 'ak' ? 'ak_shot' : 'sniper_shot');               
+  ray.setFromCamera(new THREE.Vector2(0, 0), camera);
+  ray.far = CFG.range[k];
+  const hits = ray.intersectObjects([...hitboxes, ...wallMeshes], false);
+  if (!hits.length) return;
+  const z = hits[0].object.userData.zombie;          
+  if (z && z.hp > 0) hitZombie(z);
+}
+function hitZombie(z) {
+  z.hp--; z.flashT = 0.15; playSound('hit', 0.7);
+  if (z.state === 'idle') z.state = 'chase';        
+  if (z.hp <= 0) killZombie(z);
+}
+function killZombie(z) {
+  z.state = 'dead'; z.hp = 0; kills++;
+  hitboxes.splice(hitboxes.indexOf(z.hit), 1);       
+  if (z.mixer) z.mixer.stopAllAction();
+  hud();
+}
+
+
+const clock = new THREE.Clock();
+const tmp = new THREE.Vector3();
+
+function update(dt) {
+  if (cd > 0) cd -= dt;
+  const spd = CFG.playerSpeed * (player.boost > 0 ? CFG.boostMult : 1);
+  const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw), rx = Math.cos(player.yaw), rz = -Math.sin(player.yaw);
+  let mx = 0, mz = 0;
+  if (keys.KeyW) { mx += fx; mz += fz; } if (keys.KeyS) { mx -= fx; mz -= fz; }
+  if (keys.KeyD) { mx += rx; mz += rz; } if (keys.KeyA) { mx -= rx; mz -= rz; }
+  const len = Math.hypot(mx, mz), moving = len > 0;
+  if (moving) { player.pos.x += mx / len * spd * dt; player.pos.z += mz / len * spd * dt; }
+  resolve(player.pos, CFG.playerRadius);
+  if (player.boost > 0) player.boost = Math.max(0, player.boost - dt);
+  const bobT = performance.now() / 1000;
+  camera.position.set(player.pos.x, 1.7 + (moving ? Math.sin(bobT * 10) * 0.035 : 0), player.pos.z);
+  camera.rotation.set(player.pitch, player.yaw, 0);
+  camera.fov += ((zoom && cur === 1 ? 26 : 75) - camera.fov) * Math.min(1, dt * 12); camera.updateProjectionMatrix();   // zoom del sniper
+
+  const w = weapons[cur];
+  w.pivot.position.set(w.base.x + (moving ? Math.sin(bobT * 5) * 0.008 : 0), w.base.y + (moving ? Math.abs(Math.sin(bobT * 10)) * 0.012 : 0), w.base.z + kick * 0.06);
+  w.pivot.rotation.x = kick * 0.12;
+  kick = Math.max(0, kick - dt * 9); muzzle.intensity *= 0.6;
+  w.pivot.visible = !(zoom && cur === 1);  
+
+  for (const p of pickups) {
+    if (!p.m.visible) continue;
+    p.m.rotation.y += dt * 2; p.m.position.y = 0.75 + Math.sin(bobT * 3 + p.m.position.x) * 0.1;
+    if (Math.hypot(p.m.position.x - player.pos.x, p.m.position.z - player.pos.z) < 1.4) {
+      p.m.visible = false;
+      if (p.type === 'ammo') { ammo.ak += CFG.pickupAmmo.ak; ammo.sniper += CFG.pickupAmmo.sniper; toast(`+${CFG.pickupAmmo.ak} balas AK · +${CFG.pickupAmmo.sniper} balas sniper`); }
+      else { player.boost = CFG.boostTime; toast('¡VELOCIDAD EXTRA!'); }
+      playSound('pickup'); hud();
+    }
+  }
+
+
+  for (const z of zombies) {
+    z.t += dt;
+    if (z.flashT > 0) { z.flashT -= dt; for (const m of z.mats) m.emissive?.setRGB(z.flashT > 0 ? 0.8 : 0, 0, 0); }
+    if (z.state === 'dead') {                      
+      z.deadT = Math.min(1, z.deadT + dt * 2.2);
+      z.root.rotation.x = -Math.PI / 2 * z.deadT; 
+      continue;
+    }
+    if (z.mixer) z.mixer.update(dt);
+    const dx = player.pos.x - z.root.position.x, dz = player.pos.z - z.root.position.z, dist = Math.hypot(dx, dz);
+    if (z.state === 'idle') {
+      if (dist < CFG.detectRange) { z.state = 'chase'; play(z, 'Walk'); toast('¡Un zombi te ha detectado!', 900); }   // RF05
+      else { z.holder.rotation.z = Math.sin(z.t * 1.6) * 0.03; continue; }
+    }
+
+    play(z, 'Walk');
+    z.root.rotation.y = Math.atan2(dx, dz);
+    z.root.position.x += dx / dist * z.T.speed * dt; z.root.position.z += dz / dist * z.T.speed * dt;
+    resolve(z.root.position, 0.5);
+    if (!z.mixer) { z.holder.position.y = Math.abs(Math.sin(z.t * 9)) * 0.08; z.holder.rotation.z = Math.sin(z.t * 9) * 0.08; }
+    if (dist < z.T.catchDist) return gameOver();     
+  }
+
+  for (let i = 0; i < zombies.length; i++) for (let j = i + 1; j < zombies.length; j++) {
+    const a = zombies[i], b = zombies[j]; if (a.state !== 'chase' || b.state !== 'chase') continue;
+    tmp.subVectors(a.root.position, b.root.position); tmp.y = 0; const d = tmp.length();
+    if (d < 1 && d > 0.001) { tmp.multiplyScalar((1 - d) / d * 0.5); a.root.position.add(tmp); b.root.position.sub(tmp); }
+  }
+
+
+  const de = Math.hypot(player.pos.x - EXTRACT.x, player.pos.z - EXTRACT.z);
+  $('dist').textContent = Math.max(0, de - EXTRACT_R).toFixed(0);
+  if (de < EXTRACT_R) win();
+}
+
+function gameOver() {
+  if (state !== 'playing') return;
+  state = 'dead'; document.exitPointerLock(); $('dmg').style.opacity = 1; $('over').classList.remove('hidden');
+}
+function win() {
+  if (state !== 'playing') return;
+  state = 'won'; document.exitPointerLock(); $('win').classList.remove('hidden');
+}
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (state === 'playing' && document.pointerLockElement) update(dt);
+  else if (state === 'menu') { camera.position.set(0, 1.7, 96); camera.rotation.set(0, 0, 0); }
+  exPad.material.opacity = 0.35 + Math.sin(performance.now() / 400) * 0.15;
+  renderer.render(scene, camera);
+});
+
+
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (state === 'playing') { if (e.code === 'Digit1') setWeapon(0); if (e.code === 'Digit2') setWeapon(1); }
+  if (e.code === 'KeyR' && (state === 'dead' || state === 'won')) location.reload();
+});
+addEventListener('keyup', e => keys[e.code] = false);
+addEventListener('mousemove', e => {
+  if (state !== 'playing' || !document.pointerLockElement) return;
+  const sens = zoom && cur === 1 ? 0.0009 : 0.0022;
+  player.yaw -= e.movementX * sens;
+  player.pitch = Math.max(-1.4, Math.min(1.4, player.pitch - e.movementY * sens));
+});
+
+addEventListener('mousedown', e => {
+  if (state !== 'playing' || !document.pointerLockElement) return;
+  if (e.button === 0) fire();
+  if (e.button === 2 && cur === 1) zoom = !zoom;      
+});
+addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('pointerlockchange', () => {
+  if (state === 'playing') $('pause').classList.toggle('hidden', !!document.pointerLockElement);
+});
+$('pause').addEventListener('click', () => renderer.domElement.requestPointerLock());
+$('retry').onclick = $('again').onclick = () => location.reload();
+$('play').onclick = () => {
+  state = 'playing'; $('menu').classList.add('hidden'); $('hud').classList.remove('hidden');
+  renderer.domElement.requestPointerLock(); hud(); toast('Llega a la zona verde de extracción', 2500);
+};
+
+
+(async () => {
+  try {
+    const [ak, sniper, pvz, mutant] = await Promise.all([load('ak47.glb'), load('sniper.glb'), load('zombie_pvz.glb'), load('zombie_mutant.glb')]);
+    gltfs = { ak, sniper, pvz, mutant };
+    buildWeapons(); setWeapon(0);
+    ZOMBIE_SPAWNS.forEach(([x, z, t]) => spawnZombie(x, z, t));
+    $('play').disabled = false; $('play').textContent = 'JUGAR'; $('total').textContent = zombies.length;
+  } catch (err) {
+    console.error(err);
+    $('play').textContent = 'Error al cargar';
+    $('loadmsg').textContent = 'No se pudieron cargar los modelos. Abre el juego con un servidor local (no con doble clic en index.html). ' + err.message;
+  }
+})();
